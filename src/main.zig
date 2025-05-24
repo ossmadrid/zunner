@@ -5,17 +5,18 @@
 const std = @import("std");
 const linux = std.os.linux;
 const os = std.os;
+const cli = @import("cli.zig");
 
 const SIGCHLD = 17;
 
-pub fn child(_: usize) callconv(.C) u8 {
+pub fn child(_: usize) callconv(.C) u8 {    
     const bin = "/bin/sh";
     const argv: [*:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{ bin, "-i" };
     const envp: [*:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{};
-    const newRoot = "/tmp/alpine";
+    const newRoot = "./alpine";
     const ret = linux.chroot(newRoot);
     if (linux.E.init(ret) != .SUCCESS) {
-        std.debug.panic("chroot failed\n", .{});
+        std.debug.panic("chroot failed: {}\n", .{linux.E.init(ret)});
     }
     std.debug.print("hey\n", .{});
     _ = linux.chdir("/");
@@ -24,13 +25,22 @@ pub fn child(_: usize) callconv(.C) u8 {
     return 0;
 }
 
-pub fn main() !void {
+pub fn main() !u8 {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    //defer std.debug.assert(gpa.deinit() == .ok);
+    const allocator = gpa.allocator();
+    const args = cli.parseArgs(allocator) catch {
+        std.debug.panic("Invalid args or an error occurred", .{});
+    };
+
+    if (cli.get_bool(args, "--help")) {
+        cli.print_usage(args);
+        return 0;
+    }
+    
     var ptid: i32 = 0;
     var ctid: i32 = 0;
-    var general_purpose_allocator = std.heap.GeneralPurposeAllocator(.{}){};
-    defer std.debug.assert(general_purpose_allocator.deinit() == .ok);
-    const gpa = general_purpose_allocator.allocator();
-    const stack = try gpa.alloc(u8, 1024);
+    const stack = try allocator.alloc(u8, 1024);
     const pid = linux.clone(&child, @intFromPtr(&stack), SIGCHLD, 0, &ptid, 0, &ctid);
     if (linux.E.init(pid) != .SUCCESS) {
         std.debug.panic("panic\n", .{});
@@ -43,6 +53,8 @@ pub fn main() !void {
             std.debug.panic("waitpid failed\n", .{});
         }
 
-        gpa.free(stack);
+        allocator.free(stack);
     }
+
+    return 0;
 }
