@@ -4,8 +4,17 @@ const testing = std.testing;
 const testallocator = testing.allocator;
 
 const RawArgs = struct {
+    allocator: Allocator,
+    args: [][:0]u8,
     executable_name: []u8,
     map: std.StringHashMap([]const u8),
+
+    const Self = @This();
+
+    pub fn deinit(self: *Self) void {
+        std.process.argsFree(self.allocator, self.args);
+        self.map.deinit();
+    }
 };
 
 const USAGE_STRING =
@@ -21,7 +30,7 @@ const USAGE_STRING =
 
 /// Print the usage message using the executable name.
 pub fn print_usage(args: RawArgs) void {
-    std.debug.print(USAGE_STRING, .{ args.executable_name });
+    std.debug.print(USAGE_STRING, .{args.executable_name});
 }
 
 fn arg_is_flag(arg: []u8) bool {
@@ -29,7 +38,7 @@ fn arg_is_flag(arg: []u8) bool {
 }
 
 /// Parse command-line arguments into a `RawArgs` structure.
-/// 
+///
 /// Arguments with values (e.g. `--something 8080`) are stored as key-value pairs.
 /// Flags not followed by anything (e.g `--something`) are stored with an empty value.
 ///
@@ -50,9 +59,11 @@ pub fn parseArgs(allocator: Allocator) !RawArgs {
     const args = try std.process.argsAlloc(allocator);
     if (args.len == 0) return error.MissingExecutable;
 
-    var result = RawArgs{ 
-        .map = std.StringHashMap(([]const u8)).init(allocator), 
-        .executable_name = args[0]
+    var result = RawArgs{
+        .allocator = allocator,
+        .args = args,
+        .map = std.StringHashMap([]const u8).init(allocator),
+        .executable_name = args[0],
     };
 
     if (args.len == 1) return result;
@@ -60,7 +71,7 @@ pub fn parseArgs(allocator: Allocator) !RawArgs {
         try result.map.put(args[1], "");
         return result;
     }
-    
+
     // skip the executable name and loop for each arg
     for (1..args.len - 1) |i| {
         const prev = args[i];
@@ -71,7 +82,7 @@ pub fn parseArgs(allocator: Allocator) !RawArgs {
             try result.map.put(prev, curr);
         }
     }
-    
+
     return result;
 }
 
@@ -95,6 +106,7 @@ pub fn get_i32(args: RawArgs, key: []const u8) i32 {
 pub fn print_raw_map(args: RawArgs) void {
     var iterator = args.map.iterator();
     while (iterator.next()) |key| {
-        std.debug.print("{s}: {s}\n", .{key.key_ptr.*, key.value_ptr.*});
+        std.debug.print("{s}: {s}\n", .{ key.key_ptr.*, key.value_ptr.* });
     }
 }
+
