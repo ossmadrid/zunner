@@ -41,6 +41,12 @@ pub fn child(_: usize) callconv(.C) u8 {
         std.debug.panic("mount proc failed: {}\n", .{linux.E.init(ret)});
     }
 
+    const hostname: []const u8 = "container";
+    ret = linux.syscall2(.sethostname, @intFromPtr(hostname.ptr), hostname.len);
+    if (linux.E.init(ret) != .SUCCESS) {
+        std.debug.panic("mount proc failed: {}\n", .{linux.E.init(ret)});
+    }
+
     _ = linux.execve(bin, argv, envp);
     std.debug.print("panic", .{});
     return 0;
@@ -65,7 +71,7 @@ pub fn main() !u8 {
     var ctid: i32 = 0;
     const stack = try allocator.alloc(u8, 1024);
     defer allocator.free(stack);
-    const pid = linux.clone(&child, @intFromPtr(&stack), SIGCHLD | linux.CLONE.NEWPID | linux.CLONE.NEWNS, 0, &ptid, 0, &ctid);
+    const pid = linux.clone(&child, @intFromPtr(&stack), SIGCHLD | linux.CLONE.NEWPID | linux.CLONE.NEWNS | linux.CLONE.NEWUTS, 0, &ptid, 0, &ctid);
     if (linux.E.init(pid) != .SUCCESS) {
         std.debug.panic("panic\n", .{});
     }
