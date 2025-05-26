@@ -40,6 +40,15 @@ pub fn child(_: usize) callconv(.C) u8 {
     if (linux.E.init(ret) != .SUCCESS) {
         std.debug.panic("chdir failed: {}\n", .{linux.E.init(ret)});
     }
+
+    //
+    // Mount proc filesystem
+    //
+    ret = linux.mount("proc", "/proc", "proc", 0, 0);
+    if (linux.E.init(ret) != .SUCCESS) {
+        std.debug.panic("mount proc failed: {}\n", .{linux.E.init(ret)});
+    }
+
     _ = linux.execve(bin, argv, envp);
     std.debug.print("panic", .{});
     return 0;
