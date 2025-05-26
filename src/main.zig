@@ -14,11 +14,32 @@ pub fn child(_: usize) callconv(.C) u8 {
     const argv: [*:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{ bin, "-i" };
     const envp: [*:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{};
     const newRoot = "./alpine";
-    const ret = linux.chroot(newRoot);
+
+    //
+    // Create a new mount namespace
+    //
+    var ret = linux.unshare(linux.CLONE.NEWNS);
+    if (linux.E.init(ret) != .SUCCESS) {
+        std.debug.panic("unshare failed: {}\n", .{linux.E.init(ret)});
+    }
+
+    //
+    // Remount root privately to ensure mount events are not replicated
+    // in our view of the filesystem
+    //
+    ret = linux.mount("", "/", null, linux.MS.PRIVATE | linux.MS.REC, 0);
+    if (linux.E.init(ret) != .SUCCESS) {
+        std.debug.panic("mount failed: {}\n", .{linux.E.init(ret)});
+    }
+
+    ret = linux.chroot(newRoot);
     if (linux.E.init(ret) != .SUCCESS) {
         std.debug.panic("chroot failed: {}\n", .{linux.E.init(ret)});
     }
-    _ = linux.chdir("/");
+    ret = linux.chdir("/");
+    if (linux.E.init(ret) != .SUCCESS) {
+        std.debug.panic("chdir failed: {}\n", .{linux.E.init(ret)});
+    }
     _ = linux.execve(bin, argv, envp);
     std.debug.print("panic", .{});
     return 0;
