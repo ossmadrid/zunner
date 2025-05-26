@@ -16,18 +16,10 @@ pub fn child(_: usize) callconv(.C) u8 {
     const newRoot = "./alpine";
 
     //
-    // Create a new mount namespace
-    //
-    var ret = linux.unshare(linux.CLONE.NEWNS);
-    if (linux.E.init(ret) != .SUCCESS) {
-        std.debug.panic("unshare failed: {}\n", .{linux.E.init(ret)});
-    }
-
-    //
     // Remount root privately to ensure mount events are not replicated
     // in our view of the filesystem
     //
-    ret = linux.mount("", "/", null, linux.MS.PRIVATE | linux.MS.REC, 0);
+    var ret = linux.mount("", "/", null, linux.MS.PRIVATE | linux.MS.REC, 0);
     if (linux.E.init(ret) != .SUCCESS) {
         std.debug.panic("mount failed: {}\n", .{linux.E.init(ret)});
     }
@@ -73,7 +65,7 @@ pub fn main() !u8 {
     var ctid: i32 = 0;
     const stack = try allocator.alloc(u8, 1024);
     defer allocator.free(stack);
-    const pid = linux.clone(&child, @intFromPtr(&stack), SIGCHLD, 0, &ptid, 0, &ctid);
+    const pid = linux.clone(&child, @intFromPtr(&stack), SIGCHLD | linux.CLONE.NEWPID | linux.CLONE.NEWNS, 0, &ptid, 0, &ctid);
     if (linux.E.init(pid) != .SUCCESS) {
         std.debug.panic("panic\n", .{});
     }
