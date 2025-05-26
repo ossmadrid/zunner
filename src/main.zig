@@ -8,6 +8,18 @@ const os = std.os;
 const cli = @import("cli.zig");
 
 const SIGCHLD = 17;
+const ZUNNER_RUNTIME_DIR = "/var/run/zunner";
+const CONTAINER_ID_SIZE_BYTES = 32;
+const CONTAINER_ID_SIZE_CHARS = CONTAINER_ID_SIZE_BYTES * 2;
+
+pub fn generateContainerId(buf: []u8) !void {
+    const file = try std.fs.openFileAbsolute("/dev/urandom", .{ .mode = .read_only });
+    defer file.close();
+    var bytes: [CONTAINER_ID_SIZE_BYTES]u8 = undefined;
+    _ = try file.read(&bytes);
+    const fmt = std.fmt.fmtSliceHexLower(&bytes);
+    _ = try std.fmt.bufPrint(buf, "{}", .{fmt});
+}
 
 pub fn child(_: usize) callconv(.C) u8 {
     const bin = "/bin/sh";
@@ -66,6 +78,10 @@ pub fn main() !u8 {
         cli.print_usage(args);
         return 0;
     }
+
+    var buf: [CONTAINER_ID_SIZE_CHARS]u8 = undefined;
+    try generateContainerId(&buf);
+    std.debug.print("Hex: {s}\n", .{buf});
 
     var ptid: i32 = 0;
     var ctid: i32 = 0;
