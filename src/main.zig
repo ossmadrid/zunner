@@ -103,13 +103,53 @@ pub fn child(_: usize) callconv(.C) u8 {
     //
     var ret = linux.mount("", "/", null, linux.MS.PRIVATE | linux.MS.REC, 0);
     if (linux.E.init(ret) != .SUCCESS) {
-        std.debug.panic("mount failed: {}\n", .{linux.E.init(ret)});
+        std.debug.panic("failed to remove shared propagation on mount: {}\n", .{linux.E.init(ret)});
     }
 
-    ret = linux.chroot(newRoot);
+    //
+    // Ensure newRoot is a mount point by bind mounting onto itself.
+    // This is something required by pivot_root, and can be manipulated later
+    // as an independente mount (e.g. to unmount it forever).
+    //
+    ret = linux.mount(newRoot, newRoot, null, linux.MS.BIND, 0);
     if (linux.E.init(ret) != .SUCCESS) {
-        std.debug.panic("chroot failed: {}\n", .{linux.E.init(ret)});
+        std.debug.panic("failed to bind mount rootfs onto itself: {}\n", .{linux.E.init(ret)});
     }
+
+    //
+    // Prepare pivoting by placing old root under new root, so that we don't lose its reference
+    //
+    const oldRoot = "old";
+    var realpathBuf: [4096]u8 = undefined;
+    const fullNewRoot = std.fs.realpath(newRoot, &realpathBuf) catch {
+        std.debug.panic("realpath failed", .{});
+    };
+    var pathBuf: [4096]u8 = undefined;
+    const fullOldRoot = std.fmt.bufPrintZ(&pathBuf, "{s}/{s}", .{ fullNewRoot, oldRoot }) catch { // todo: use join
+        std.debug.panic("failed to join full old root path", .{});
+    };
+    std.fs.makeDirAbsolute(fullOldRoot) catch {
+        std.debug.panic("mkdir failed", .{});
+    };
+
+    //
+    // Pivot root
+    //
+    ret = linux.syscall2(.pivot_root, @intFromPtr(newRoot), @intFromPtr(fullOldRoot.ptr));
+    if (linux.E.init(ret) != .SUCCESS) {
+        std.debug.panic("pivot failed: {}\n", .{linux.E.init(ret)});
+    }
+
+    ret = linux.umount2("/old", linux.MNT.DETACH);
+    if (linux.E.init(ret) != .SUCCESS) {
+        std.debug.panic("umount failed: {}\n", .{linux.E.init(ret)});
+    }
+
+    ret = linux.rmdir("/old");
+    if (linux.E.init(ret) != .SUCCESS) {
+        std.debug.panic("rmdir failed: {}\n", .{linux.E.init(ret)});
+    }
+
     ret = linux.chdir("/");
     if (linux.E.init(ret) != .SUCCESS) {
         std.debug.panic("chdir failed: {}\n", .{linux.E.init(ret)});
@@ -151,11 +191,10 @@ pub fn main() !u8 {
 
     var buf: [CONTAINER_ID_SIZE_CHARS]u8 = undefined;
     try generateContainerId(&buf);
-    std.debug.print("Hex: {s}\n", .{buf});
 
     var ptid: i32 = 0;
     var ctid: i32 = 0;
-    const stack = try allocator.alloc(u8, 1024);
+    const stack = try allocator.alloc(u8, 1024 * 1024);
     defer allocator.free(stack);
     const pid = clone(&child, @intFromPtr(&stack), SIGCHLD | linux.CLONE.NEWPID | linux.CLONE.NEWNS | linux.CLONE.NEWUTS, 0, &ptid, 0, &ctid) catch |err| {
         const msg = switch (err) {
