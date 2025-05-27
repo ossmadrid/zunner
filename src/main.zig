@@ -73,6 +73,24 @@ fn waitpid(pid: linux.pid_t, flags: u32) SyscallError!WaitpidResult {
     return result;
 }
 
+fn clone(
+    func: *const fn (arg: usize) callconv(.c) u8,
+    stack: usize,
+    flags: u32,
+    arg: usize,
+    ptid: ?*i32,
+    tp: usize, // aka tls
+    ctid: ?*i32,
+) SyscallError!linux.pid_t {
+    const ret = linux.clone(func, stack, flags, arg, ptid, tp, ctid);
+    const err = linux.E.init(ret);
+    if (err != .SUCCESS) {
+        return toSyscallError(err);
+    }
+    const signed_ret: isize = @bitCast(ret);
+    return @truncate(signed_ret);
+}
+
 pub fn child(_: usize) callconv(.C) u8 {
     const bin = "/bin/sh";
     const argv: [*:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{ bin, "-i" };
@@ -139,13 +157,17 @@ pub fn main() !u8 {
     var ctid: i32 = 0;
     const stack = try allocator.alloc(u8, 1024);
     defer allocator.free(stack);
-    const pid = linux.clone(&child, @intFromPtr(&stack), SIGCHLD | linux.CLONE.NEWPID | linux.CLONE.NEWNS | linux.CLONE.NEWUTS, 0, &ptid, 0, &ctid);
-    if (linux.E.init(pid) != .SUCCESS) {
-        std.debug.panic("panic\n", .{});
-    }
+    const pid = clone(&child, @intFromPtr(&stack), SIGCHLD | linux.CLONE.NEWPID | linux.CLONE.NEWNS | linux.CLONE.NEWUTS, 0, &ptid, 0, &ctid) catch |err| {
+        const msg = switch (err) {
+            SyscallError.PERM => "Cannot spawn the child process. Did you forget to run with 'sudo'?\n",
+            else => @errorName(err),
+        };
+        std.log.err("clone: {s}", .{msg});
+        std.process.exit(1);
+    };
 
     if (pid != 0) { // parent
-        const status = try waitpid(-1, 0);
+        const status = try waitpid(pid, 0);
         return status.exitStatus();
     }
 
