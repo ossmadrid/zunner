@@ -196,7 +196,8 @@ pub fn main() !u8 {
     var ctid: i32 = 0;
     const stack = try allocator.alloc(u8, 1024 * 1024);
     defer allocator.free(stack);
-    const pid = clone(&child, @intFromPtr(&stack), SIGCHLD | linux.CLONE.NEWPID | linux.CLONE.NEWNS | linux.CLONE.NEWUTS, 0, &ptid, 0, &ctid) catch |err| {
+    const nsFlags = linux.CLONE.NEWPID | linux.CLONE.NEWNS | linux.CLONE.NEWUTS;
+    const pid = clone(&child, @intFromPtr(&stack), SIGCHLD | linux.CLONE.VFORK | nsFlags, 0, &ptid, 0, &ctid) catch |err| {
         const msg = switch (err) {
             SyscallError.PERM => "Cannot spawn the child process. Did you forget to run with 'sudo'?\n",
             else => @errorName(err),
