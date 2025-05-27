@@ -21,6 +21,58 @@ pub fn generateContainerId(buf: []u8) !void {
     _ = try std.fmt.bufPrint(buf, "{}", .{fmt});
 }
 
+// Convert an Enum into an error set.
+// The names of the Enum fields will become values of the error set.
+fn enumToErrors(Enum: type) type {
+    const e_fields = @typeInfo(Enum).@"enum".fields;
+    var errors: [e_fields.len]std.builtin.Type.Error = undefined;
+    for (e_fields, 0..) |f, i| {
+        errors[i] = .{
+            .name = f.name,
+        };
+    }
+    return @Type(.{ .error_set = &errors });
+}
+
+const SyscallError = enumToErrors(linux.E);
+
+fn toSyscallError(e: linux.E) SyscallError {
+    // create a comptime map linux.E -> SyscallError
+    // assumption: enum names and SyscallErrors' names are equal
+    const enum_info = @typeInfo(SyscallError).error_set orelse unreachable;
+    const KeyPair = struct { []const u8, SyscallError };
+    comptime var static_key_pairs: [enum_info.len]KeyPair = undefined;
+    comptime for (enum_info, 0..) |f, i| {
+        static_key_pairs[i] = .{ f.name, @field(SyscallError, f.name) };
+    };
+    const m = std.StaticStringMap(SyscallError).initComptime(static_key_pairs);
+
+    const name = @tagName(e);
+    return m.get(name) orelse unreachable;
+}
+
+const WaitpidResult = struct {
+    pid: linux.pid_t,
+    status: u32,
+
+    pub fn exitStatus(self: @This()) u8 {
+        return linux.W.EXITSTATUS(self.status);
+    }
+};
+
+fn waitpid(pid: linux.pid_t, flags: u32) SyscallError!WaitpidResult {
+    var result = WaitpidResult{
+        .pid = undefined,
+        .status = undefined,
+    };
+    const ret = linux.waitpid(pid, &result.status, flags);
+    const err = linux.E.init(ret);
+    if (err != .SUCCESS) {
+        return toSyscallError(err);
+    }
+    return result;
+}
+
 pub fn child(_: usize) callconv(.C) u8 {
     const bin = "/bin/sh";
     const argv: [*:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{ bin, "-i" };
@@ -93,11 +145,8 @@ pub fn main() !u8 {
     }
 
     if (pid != 0) { // parent
-        std.time.sleep(100);
-        const ret = linux.waitpid(-1, undefined, 0);
-        if (linux.E.init(ret) != .SUCCESS) {
-            std.debug.panic("waitpid failed\n", .{});
-        }
+        const status = try waitpid(-1, 0);
+        return status.exitStatus();
     }
 
     return 0;
