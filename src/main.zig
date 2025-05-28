@@ -120,13 +120,6 @@ pub fn child(_: usize) callconv(.C) u8 {
     if (linux.E.init(ret) != .SUCCESS) {
         std.debug.panic("failed to mount overlayfs: {}\n", .{linux.E.init(ret)});
     }
-    defer {
-        // Unmount the merged directory on exit
-        const umountRet = linux.umount2(mergedNewRoot, linux.MNT.DETACH);
-        if (linux.E.init(umountRet) != .SUCCESS) {
-            std.debug.panic("failed to unmount merged directory: {}\n", .{linux.E.init(umountRet)});
-        }
-    }
 
     //
     // Remount root privately to ensure mount events are not replicated
@@ -259,7 +252,14 @@ pub fn main() !u8 {
     }) catch |err| {
         std.debug.panic("Failed to format OverlayFS data, error: {s}", .{@errorName(err)});
     };
-    defer allocator.free(mountData);
+    defer {
+        allocator.free(mountData);
+        const mergedNewRoot = paths[3];
+        const umountRet = linux.umount2(mergedNewRoot, linux.MNT.DETACH);
+        if (linux.E.init(umountRet) != .SUCCESS) {
+            std.debug.panic("failed to unmount merged directory: {}\n", .{linux.E.init(umountRet)});
+        }
+    }
     std.log.info("Container ID: {s}", .{containerId});
     std.log.info("Container runtime directory: {s}", .{containerRuntimeDir});
     std.log.info("OverlayFS mount data: {s}", .{mountData});
