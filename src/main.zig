@@ -11,6 +11,13 @@ const SIGCHLD = 17;
 const ZUNNER_RUNTIME_DIR = "/var/run/zunner";
 const CONTAINER_ID_SIZE_BYTES = 32;
 const CONTAINER_ID_SIZE_CHARS = CONTAINER_ID_SIZE_BYTES * 2;
+const LOWER_DIR = "lower";
+const UPPER_DIR = "upper";
+const WORK_DIR = "work";
+const MERGED_DIR = "merged";
+
+var paths: [4][:0]u8 = undefined; // todo: this should not be global
+var mountData: [:0]const u8 = undefined; // todo: this should not be global
 
 pub fn generateContainerId(buf: []u8) !void {
     const file = try std.fs.openFileAbsolute("/dev/urandom", .{ .mode = .read_only });
@@ -98,22 +105,36 @@ pub fn child(_: usize) callconv(.C) u8 {
     const newRoot = "./alpine";
 
     //
-    // Remount root privately to ensure mount events are not replicated
-    // in our view of the filesystem
+    // Bind mount the new root filesystem to the lower layer of OverlayFS
     //
-    var ret = linux.mount("", "/", null, linux.MS.PRIVATE | linux.MS.REC, 0);
+    var ret = linux.mount(newRoot, paths[0], null, linux.MS.BIND, 0);
     if (linux.E.init(ret) != .SUCCESS) {
-        std.debug.panic("failed to remove shared propagation on mount: {}\n", .{linux.E.init(ret)});
+        std.debug.panic("failed to bind mount new root: {}\n", .{linux.E.init(ret)});
     }
 
     //
-    // Ensure newRoot is a mount point by bind mounting onto itself.
-    // This is something required by pivot_root, and can be manipulated later
-    // as an independente mount (e.g. to unmount it forever).
+    // Create a new OverlayFS mount on the merged directory
     //
-    ret = linux.mount(newRoot, newRoot, null, linux.MS.BIND, 0);
+    const mergedNewRoot = paths[3];
+    ret = linux.mount("overlay", mergedNewRoot, "overlay", 0, @intFromPtr(mountData.ptr));
     if (linux.E.init(ret) != .SUCCESS) {
-        std.debug.panic("failed to bind mount rootfs onto itself: {}\n", .{linux.E.init(ret)});
+        std.debug.panic("failed to mount overlayfs: {}\n", .{linux.E.init(ret)});
+    }
+    defer {
+        // Unmount the merged directory on exit
+        const umountRet = linux.umount2(mergedNewRoot, linux.MNT.DETACH);
+        if (linux.E.init(umountRet) != .SUCCESS) {
+            std.debug.panic("failed to unmount merged directory: {}\n", .{linux.E.init(umountRet)});
+        }
+    }
+
+    //
+    // Remount root privately to ensure mount events are not replicated
+    // in our view of the filesystem
+    //
+    ret = linux.mount("", "/", null, linux.MS.PRIVATE | linux.MS.REC, 0);
+    if (linux.E.init(ret) != .SUCCESS) {
+        std.debug.panic("failed to remove shared propagation on mount: {}\n", .{linux.E.init(ret)});
     }
 
     //
@@ -121,7 +142,7 @@ pub fn child(_: usize) callconv(.C) u8 {
     //
     const oldRoot = "old";
     var realpathBuf: [4096]u8 = undefined;
-    const fullNewRoot = std.fs.realpath(newRoot, &realpathBuf) catch {
+    const fullNewRoot = std.fs.realpath(mergedNewRoot, &realpathBuf) catch {
         std.debug.panic("realpath failed", .{});
     };
     var pathBuf: [4096]u8 = undefined;
@@ -135,7 +156,7 @@ pub fn child(_: usize) callconv(.C) u8 {
     //
     // Pivot root
     //
-    ret = linux.syscall2(.pivot_root, @intFromPtr(newRoot), @intFromPtr(fullOldRoot.ptr));
+    ret = linux.syscall2(.pivot_root, @intFromPtr(mergedNewRoot.ptr), @intFromPtr(fullOldRoot.ptr));
     if (linux.E.init(ret) != .SUCCESS) {
         std.debug.panic("pivot failed: {}\n", .{linux.E.init(ret)});
     }
@@ -189,8 +210,59 @@ pub fn main() !u8 {
         return 0;
     }
 
-    var buf: [CONTAINER_ID_SIZE_CHARS]u8 = undefined;
-    try generateContainerId(&buf);
+    //
+    // Ensure the runtime directory exists
+    //
+    _ = std.fs.accessAbsolute(ZUNNER_RUNTIME_DIR, .{ .mode = .read_write }) catch |err| {
+        if (err == std.fs.Dir.AccessError.FileNotFound) {
+            try std.fs.makeDirAbsolute(ZUNNER_RUNTIME_DIR);
+        } else {
+            std.debug.panic("Failed to access runtime directory", .{});
+        }
+    };
+
+    //
+    // Generate container id
+    //
+    var containerId: [CONTAINER_ID_SIZE_CHARS]u8 = undefined;
+    generateContainerId(&containerId) catch {
+        std.debug.panic("error generating container id", .{});
+    };
+
+    //
+    // Create runtime directory for the container, containing lower, upper, work and merged directories
+    // used by OverlayFS
+    //
+    const containerRuntimeDir = std.fs.path.join(allocator, &.{ ZUNNER_RUNTIME_DIR, &containerId }) catch |err| {
+        std.debug.panic("Failed to join container runtime directory path, error: {s}", .{@errorName(err)});
+    };
+    defer allocator.free(containerRuntimeDir);
+    std.fs.makeDirAbsolute(containerRuntimeDir) catch |err| {
+        std.debug.panic("failed to create container runtime directory, id: {s}, error: {s}", .{ containerId, @errorName(err) });
+    };
+
+    const dirs = [4][]const u8{ LOWER_DIR, UPPER_DIR, WORK_DIR, MERGED_DIR };
+    for (dirs, 0..) |dir, i| {
+        const path = std.fs.path.joinZ(allocator, &.{ containerRuntimeDir, dir }) catch |err| {
+            std.debug.panic("Failed to join container runtime directory path for {s} dir, error: {s}", .{ dir, @errorName(err) });
+        };
+        std.fs.makeDirAbsolute(path) catch |err| {
+            std.debug.panic("failed to create {s} directory for id: {s}, error: {s}", .{ dir, containerId, @errorName(err) });
+        };
+        paths[i] = path;
+    }
+    defer {
+        for (paths) |p| allocator.free(p);
+    }
+    mountData = std.fmt.allocPrintZ(allocator, "lowerdir={s},upperdir={s},workdir={s}", .{
+        paths[0], paths[1], paths[2],
+    }) catch |err| {
+        std.debug.panic("Failed to format OverlayFS data, error: {s}", .{@errorName(err)});
+    };
+    defer allocator.free(mountData);
+    std.log.info("Container ID: {s}", .{containerId});
+    std.log.info("Container runtime directory: {s}", .{containerRuntimeDir});
+    std.log.info("OverlayFS mount data: {s}", .{mountData});
 
     var ptid: i32 = 0;
     var ctid: i32 = 0;
