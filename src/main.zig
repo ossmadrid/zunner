@@ -135,15 +135,15 @@ pub fn child(_: usize) callconv(.C) u8 {
     //
     const oldRoot = "old";
     var realpathBuf: [4096]u8 = undefined;
-    const fullNewRoot = std.fs.realpath(mergedNewRoot, &realpathBuf) catch {
-        std.debug.panic("realpath failed", .{});
+    const fullNewRoot = std.fs.realpath(mergedNewRoot, &realpathBuf) catch |err| {
+        std.debug.panic("realpath failed: {s}", .{@errorName(err)});
     };
     var pathBuf: [4096]u8 = undefined;
-    const fullOldRoot = std.fmt.bufPrintZ(&pathBuf, "{s}/{s}", .{ fullNewRoot, oldRoot }) catch { // todo: use join
-        std.debug.panic("failed to join full old root path", .{});
+    const fullOldRoot = std.fmt.bufPrintZ(&pathBuf, "{s}/{s}", .{ fullNewRoot, oldRoot }) catch |err| {
+        std.debug.panic("failed to join full old root path: {s}", .{@errorName(err)});
     };
-    std.fs.makeDirAbsolute(fullOldRoot) catch {
-        std.debug.panic("mkdir failed", .{});
+    std.fs.makeDirAbsolute(fullOldRoot) catch |err| {
+        std.debug.panic("mkdir failed: {s}", .{@errorName(err)});
     };
 
     //
