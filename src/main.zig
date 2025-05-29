@@ -6,97 +6,12 @@ const std = @import("std");
 const linux = std.os.linux;
 const os = std.os;
 const cli = @import("cli.zig");
-
-const SIGCHLD = 17;
-const ZUNNER_RUNTIME_DIR = "/var/run/zunner";
-const CONTAINER_ID_SIZE_BYTES = 32;
-const CONTAINER_ID_SIZE_CHARS = CONTAINER_ID_SIZE_BYTES * 2;
-const LOWER_DIR = "lower";
-const UPPER_DIR = "upper";
-const WORK_DIR = "work";
-const MERGED_DIR = "merged";
+const constants = @import("constants.zig");
+const utils = @import("utils.zig");
+const syscalls = @import("syscalls.zig");
 
 var paths: [4][:0]u8 = undefined; // todo: this should not be global
 var mountData: [:0]const u8 = undefined; // todo: this should not be global
-
-pub fn generateContainerId(buf: []u8) !void {
-    const file = try std.fs.openFileAbsolute("/dev/urandom", .{ .mode = .read_only });
-    defer file.close();
-    var bytes: [CONTAINER_ID_SIZE_BYTES]u8 = undefined;
-    _ = try file.read(&bytes);
-    const fmt = std.fmt.fmtSliceHexLower(&bytes);
-    _ = try std.fmt.bufPrint(buf, "{}", .{fmt});
-}
-
-// Convert an Enum into an error set.
-// The names of the Enum fields will become values of the error set.
-fn enumToErrors(Enum: type) type {
-    const e_fields = @typeInfo(Enum).@"enum".fields;
-    var errors: [e_fields.len]std.builtin.Type.Error = undefined;
-    for (e_fields, 0..) |f, i| {
-        errors[i] = .{
-            .name = f.name,
-        };
-    }
-    return @Type(.{ .error_set = &errors });
-}
-
-const SyscallError = enumToErrors(linux.E);
-
-fn toSyscallError(e: linux.E) SyscallError {
-    // create a comptime map linux.E -> SyscallError
-    // assumption: enum names and SyscallErrors' names are equal
-    const enum_info = @typeInfo(SyscallError).error_set orelse unreachable;
-    const KeyPair = struct { []const u8, SyscallError };
-    comptime var static_key_pairs: [enum_info.len]KeyPair = undefined;
-    comptime for (enum_info, 0..) |f, i| {
-        static_key_pairs[i] = .{ f.name, @field(SyscallError, f.name) };
-    };
-    const m = std.StaticStringMap(SyscallError).initComptime(static_key_pairs);
-
-    const name = @tagName(e);
-    return m.get(name) orelse unreachable;
-}
-
-const WaitpidResult = struct {
-    pid: linux.pid_t,
-    status: u32,
-
-    pub fn exitStatus(self: @This()) u8 {
-        return linux.W.EXITSTATUS(self.status);
-    }
-};
-
-fn waitpid(pid: linux.pid_t, flags: u32) SyscallError!WaitpidResult {
-    var result = WaitpidResult{
-        .pid = undefined,
-        .status = undefined,
-    };
-    const ret = linux.waitpid(pid, &result.status, flags);
-    const err = linux.E.init(ret);
-    if (err != .SUCCESS) {
-        return toSyscallError(err);
-    }
-    return result;
-}
-
-fn clone(
-    func: *const fn (arg: usize) callconv(.c) u8,
-    stack: usize,
-    flags: u32,
-    arg: usize,
-    ptid: ?*i32,
-    tp: usize, // aka tls
-    ctid: ?*i32,
-) SyscallError!linux.pid_t {
-    const ret = linux.clone(func, stack, flags, arg, ptid, tp, ctid);
-    const err = linux.E.init(ret);
-    if (err != .SUCCESS) {
-        return toSyscallError(err);
-    }
-    const signed_ret: isize = @bitCast(ret);
-    return @truncate(signed_ret);
-}
 
 pub fn child(_: usize) callconv(.C) u8 {
     const bin = "/bin/sh";
@@ -206,9 +121,9 @@ pub fn main() !u8 {
     //
     // Ensure the runtime directory exists
     //
-    _ = std.fs.accessAbsolute(ZUNNER_RUNTIME_DIR, .{ .mode = .read_write }) catch |err| {
+    _ = std.fs.accessAbsolute(constants.ZUNNER_RUNTIME_DIR, .{ .mode = .read_write }) catch |err| {
         if (err == std.fs.Dir.AccessError.FileNotFound) {
-            try std.fs.makeDirAbsolute(ZUNNER_RUNTIME_DIR);
+            try std.fs.makeDirAbsolute(constants.ZUNNER_RUNTIME_DIR);
         } else {
             std.debug.panic("Failed to access runtime directory", .{});
         }
@@ -217,8 +132,8 @@ pub fn main() !u8 {
     //
     // Generate container id
     //
-    var containerId: [CONTAINER_ID_SIZE_CHARS]u8 = undefined;
-    generateContainerId(&containerId) catch {
+    var containerId: [constants.CONTAINER_ID_SIZE_CHARS]u8 = undefined;
+    utils.generateContainerId(&containerId) catch {
         std.debug.panic("error generating container id", .{});
     };
 
@@ -226,7 +141,7 @@ pub fn main() !u8 {
     // Create runtime directory for the container, containing lower, upper, work and merged directories
     // used by OverlayFS
     //
-    const containerRuntimeDir = std.fs.path.join(allocator, &.{ ZUNNER_RUNTIME_DIR, &containerId }) catch |err| {
+    const containerRuntimeDir = std.fs.path.join(allocator, &.{ constants.ZUNNER_RUNTIME_DIR, &containerId }) catch |err| {
         std.debug.panic("Failed to join container runtime directory path, error: {s}", .{@errorName(err)});
     };
     defer allocator.free(containerRuntimeDir);
@@ -234,7 +149,7 @@ pub fn main() !u8 {
         std.debug.panic("failed to create container runtime directory, id: {s}, error: {s}", .{ containerId, @errorName(err) });
     };
 
-    const dirs = [4][]const u8{ LOWER_DIR, UPPER_DIR, WORK_DIR, MERGED_DIR };
+    const dirs = [4][]const u8{ constants.LOWER_DIR, constants.UPPER_DIR, constants.WORK_DIR, constants.MERGED_DIR };
     for (dirs, 0..) |dir, i| {
         const path = std.fs.path.joinZ(allocator, &.{ containerRuntimeDir, dir }) catch |err| {
             std.debug.panic("Failed to join container runtime directory path for {s} dir, error: {s}", .{ dir, @errorName(err) });
@@ -262,9 +177,9 @@ pub fn main() !u8 {
     const stack = try allocator.alloc(u8, 1024 * 1024);
     defer allocator.free(stack);
     const nsFlags = linux.CLONE.NEWPID | linux.CLONE.NEWNS | linux.CLONE.NEWUTS;
-    const pid = clone(&child, @intFromPtr(&stack), SIGCHLD | linux.CLONE.VFORK | nsFlags, 0, &ptid, 0, &ctid) catch |err| {
+    const pid = syscalls.clone(&child, @intFromPtr(&stack), constants.SIGCHLD | linux.CLONE.VFORK | nsFlags, 0, &ptid, 0, &ctid) catch |err| {
         const msg = switch (err) {
-            SyscallError.PERM => "Cannot spawn the child process. Did you forget to run with 'sudo'?\n",
+            syscalls.SyscallError.PERM => "Cannot spawn the child process. Did you forget to run with 'sudo'?\n",
             else => @errorName(err),
         };
         std.log.err("clone: {s}", .{msg});
@@ -272,7 +187,7 @@ pub fn main() !u8 {
     };
 
     if (pid != 0) { // parent
-        const status = try waitpid(pid, 0);
+        const status = try syscalls.waitpid(pid, 0);
         return status.exitStatus();
     }
 
