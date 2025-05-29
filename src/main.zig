@@ -105,9 +105,18 @@ pub fn child(_: usize) callconv(.C) u8 {
     const newRoot = "./alpine";
 
     //
+    // Remount root privately to ensure mount events are not replicated
+    // in our view of the filesystem
+    //
+    var ret = linux.mount("", "/", null, linux.MS.PRIVATE | linux.MS.REC, 0);
+    if (linux.E.init(ret) != .SUCCESS) {
+        std.debug.panic("failed to remove shared propagation on mount: {}\n", .{linux.E.init(ret)});
+    }
+
+    //
     // Bind mount the new root filesystem to the lower layer of OverlayFS
     //
-    var ret = linux.mount(newRoot, paths[0], null, linux.MS.BIND, 0);
+    ret = linux.mount(newRoot, paths[0], null, linux.MS.BIND, 0);
     if (linux.E.init(ret) != .SUCCESS) {
         std.debug.panic("failed to bind mount new root: {}\n", .{linux.E.init(ret)});
     }
@@ -119,15 +128,6 @@ pub fn child(_: usize) callconv(.C) u8 {
     ret = linux.mount("overlay", mergedNewRoot, "overlay", 0, @intFromPtr(mountData.ptr));
     if (linux.E.init(ret) != .SUCCESS) {
         std.debug.panic("failed to mount overlayfs: {}\n", .{linux.E.init(ret)});
-    }
-
-    //
-    // Remount root privately to ensure mount events are not replicated
-    // in our view of the filesystem
-    //
-    ret = linux.mount("", "/", null, linux.MS.PRIVATE | linux.MS.REC, 0);
-    if (linux.E.init(ret) != .SUCCESS) {
-        std.debug.panic("failed to remove shared propagation on mount: {}\n", .{linux.E.init(ret)});
     }
 
     //
@@ -244,21 +244,14 @@ pub fn main() !u8 {
         };
         paths[i] = path;
     }
-    defer {
-        for (paths) |p| allocator.free(p);
-    }
     mountData = std.fmt.allocPrintZ(allocator, "lowerdir={s},upperdir={s},workdir={s}", .{
         paths[0], paths[1], paths[2],
     }) catch |err| {
         std.debug.panic("Failed to format OverlayFS data, error: {s}", .{@errorName(err)});
     };
     defer {
+        for (paths) |p| allocator.free(p);
         allocator.free(mountData);
-        const mergedNewRoot = paths[3];
-        const umountRet = linux.umount2(mergedNewRoot, linux.MNT.DETACH);
-        if (linux.E.init(umountRet) != .SUCCESS) {
-            std.debug.panic("failed to unmount merged directory: {}\n", .{linux.E.init(umountRet)});
-        }
     }
     std.log.info("Container ID: {s}", .{containerId});
     std.log.info("Container runtime directory: {s}", .{containerRuntimeDir});
