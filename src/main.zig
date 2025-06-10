@@ -10,14 +10,62 @@ const constants = @import("constants.zig");
 const utils = @import("utils.zig");
 const syscalls = @import("syscalls.zig");
 
-var paths: [4][:0]u8 = undefined; // todo: this should not be global
-var mountData: [:0]const u8 = undefined; // todo: this should not be global
+const overlayfs = struct {
+    lowerdir: [:0]const u8,
+    upperdir: [:0]const u8,
+    workdir: [:0]const u8,
+    mergedDir: [:0]const u8,
+    mountData: [:0]const u8,
+    containerDir: [:0]const u8,
 
-pub fn child(_: usize) callconv(.C) u8 {
+    pub fn init(allocator: std.mem.Allocator, containerId: []const u8) !*overlayfs {
+        const ofsPtr = try allocator.create(overlayfs);
+        const containerDir = try std.fs.path.joinZ(allocator, &.{ constants.ZUNNER_RUNTIME_DIR, containerId });
+        const lowerdir = try std.fs.path.joinZ(allocator, &.{ constants.ZUNNER_RUNTIME_DIR, containerId, constants.LOWER_DIR });
+        const upperdir = try std.fs.path.joinZ(allocator, &.{ constants.ZUNNER_RUNTIME_DIR, containerId, constants.UPPER_DIR });
+        const workdir = try std.fs.path.joinZ(allocator, &.{ constants.ZUNNER_RUNTIME_DIR, containerId, constants.WORK_DIR });
+        const mergedDir = try std.fs.path.joinZ(allocator, &.{ constants.ZUNNER_RUNTIME_DIR, containerId, constants.MERGED_DIR });
+        const mountData = try std.fmt.allocPrintZ(allocator, "lowerdir={s},upperdir={s},workdir={s}", .{
+            lowerdir, upperdir, workdir,
+        });
+
+        ofsPtr.* = overlayfs{
+            .lowerdir = lowerdir,
+            .upperdir = upperdir,
+            .workdir = workdir,
+            .mergedDir = mergedDir,
+            .mountData = mountData,
+            .containerDir = containerDir,
+        };
+
+        return ofsPtr;
+    }
+
+    pub fn createDirs(self: *overlayfs) !void {
+        try std.fs.makeDirAbsolute(self.containerDir);
+        try std.fs.makeDirAbsolute(self.lowerdir);
+        try std.fs.makeDirAbsolute(self.upperdir);
+        try std.fs.makeDirAbsolute(self.workdir);
+        try std.fs.makeDirAbsolute(self.mergedDir);
+    }
+
+    pub fn deinit(self: *overlayfs, allocator: std.mem.Allocator) void {
+        allocator.free(self.lowerdir);
+        allocator.free(self.upperdir);
+        allocator.free(self.workdir);
+        allocator.free(self.mergedDir);
+        allocator.free(self.mountData);
+        allocator.free(self.containerDir);
+        allocator.destroy(self);
+    }
+};
+
+pub fn child(configPtr: usize) callconv(.C) u8 {
     const bin = "/bin/sh";
     const argv: [*:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{ bin, "-i" };
     const envp: [*:null]const ?[*:0]const u8 = &[_:null]?[*:0]const u8{};
     const newRoot = "./alpine";
+    const ofs: *overlayfs = @ptrFromInt(configPtr);
 
     //
     // Remount root privately to ensure mount events are not replicated
@@ -31,7 +79,7 @@ pub fn child(_: usize) callconv(.C) u8 {
     //
     // Bind mount the new root filesystem to the lower layer of OverlayFS
     //
-    ret = linux.mount(newRoot, paths[0], null, linux.MS.BIND, 0);
+    ret = linux.mount(newRoot, ofs.lowerdir.ptr, null, linux.MS.BIND, 0);
     if (linux.E.init(ret) != .SUCCESS) {
         std.debug.panic("failed to bind mount new root: {}\n", .{linux.E.init(ret)});
     }
@@ -39,8 +87,8 @@ pub fn child(_: usize) callconv(.C) u8 {
     //
     // Create a new OverlayFS mount on the merged directory
     //
-    const mergedNewRoot = paths[3];
-    ret = linux.mount("overlay", mergedNewRoot, "overlay", 0, @intFromPtr(mountData.ptr));
+    const mergedNewRoot = ofs.mergedDir;
+    ret = linux.mount("overlay", mergedNewRoot.ptr, "overlay", 0, @intFromPtr(ofs.mountData.ptr));
     if (linux.E.init(ret) != .SUCCESS) {
         std.debug.panic("failed to mount overlayfs: {}\n", .{linux.E.init(ret)});
     }
@@ -141,43 +189,23 @@ pub fn main() !u8 {
     // Create runtime directory for the container, containing lower, upper, work and merged directories
     // used by OverlayFS
     //
-    const containerRuntimeDir = std.fs.path.join(allocator, &.{ constants.ZUNNER_RUNTIME_DIR, &containerId }) catch |err| {
-        std.debug.panic("Failed to join container runtime directory path, error: {s}", .{@errorName(err)});
-    };
-    defer allocator.free(containerRuntimeDir);
-    std.fs.makeDirAbsolute(containerRuntimeDir) catch |err| {
-        std.debug.panic("failed to create container runtime directory, id: {s}, error: {s}", .{ containerId, @errorName(err) });
-    };
+    const ofs = try overlayfs.init(allocator, &containerId);
+    defer ofs.deinit(allocator);
 
-    const dirs = [4][]const u8{ constants.LOWER_DIR, constants.UPPER_DIR, constants.WORK_DIR, constants.MERGED_DIR };
-    for (dirs, 0..) |dir, i| {
-        const path = std.fs.path.joinZ(allocator, &.{ containerRuntimeDir, dir }) catch |err| {
-            std.debug.panic("Failed to join container runtime directory path for {s} dir, error: {s}", .{ dir, @errorName(err) });
-        };
-        std.fs.makeDirAbsolute(path) catch |err| {
-            std.debug.panic("failed to create {s} directory for id: {s}, error: {s}", .{ dir, containerId, @errorName(err) });
-        };
-        paths[i] = path;
-    }
-    mountData = std.fmt.allocPrintZ(allocator, "lowerdir={s},upperdir={s},workdir={s}", .{
-        paths[0], paths[1], paths[2],
-    }) catch |err| {
-        std.debug.panic("Failed to format OverlayFS data, error: {s}", .{@errorName(err)});
-    };
-    defer {
-        for (paths) |p| allocator.free(p);
-        allocator.free(mountData);
-    }
+    try ofs.createDirs();
+
     std.log.info("Container ID: {s}", .{containerId});
-    std.log.info("Container runtime directory: {s}", .{containerRuntimeDir});
-    std.log.info("OverlayFS mount data: {s}", .{mountData});
+    std.log.info("OverlayFS mount data: {s}", .{ofs.mountData});
 
+    //
+    // Clone child process
+    //
     var ptid: i32 = 0;
     var ctid: i32 = 0;
     const stack = try allocator.alloc(u8, 1024 * 1024);
     defer allocator.free(stack);
     const nsFlags = linux.CLONE.NEWPID | linux.CLONE.NEWNS | linux.CLONE.NEWUTS;
-    const pid = syscalls.clone(&child, @intFromPtr(&stack), constants.SIGCHLD | linux.CLONE.VFORK | nsFlags, 0, &ptid, 0, &ctid) catch |err| {
+    const pid = syscalls.clone(&child, @intFromPtr(&stack), constants.SIGCHLD | linux.CLONE.VFORK | nsFlags, @intFromPtr(ofs), &ptid, 0, &ctid) catch |err| {
         const msg = switch (err) {
             syscalls.SyscallError.PERM => "Cannot spawn the child process. Did you forget to run with 'sudo'?\n",
             else => @errorName(err),
