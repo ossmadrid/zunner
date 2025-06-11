@@ -133,11 +133,23 @@ pub fn child(configPtr: usize) callconv(.C) u8 {
     }
 
     //
-    // Mount proc filesystem
+    // Mount other filesystems (proc, sysfs, devtmpfs, etc.)
     //
-    ret = linux.mount("proc", "/proc", "proc", 0, 0);
+    const mountFlags = linux.MS.NOEXEC | linux.MS.NOSUID | linux.MS.NODEV;
+
+    ret = linux.mount("proc", "/proc", "proc", mountFlags, 0);
     if (linux.E.init(ret) != .SUCCESS) {
         std.debug.panic("mount proc failed: {}\n", .{linux.E.init(ret)});
+    }
+
+    ret = linux.mount("sysfs", "/sys", "sysfs", mountFlags | linux.MS.RDONLY, 0);
+    if (linux.E.init(ret) != .SUCCESS) {
+        std.debug.panic("mount sysfs failed: {}\n", .{linux.E.init(ret)});
+    }
+
+    ret = linux.mount("devtmpfs", "/dev", "devtmpfs", mountFlags, 0);
+    if (linux.E.init(ret) != .SUCCESS) {
+        std.debug.panic("mount devtmpfs failed: {}\n", .{linux.E.init(ret)});
     }
 
     const hostname: []const u8 = "container";
