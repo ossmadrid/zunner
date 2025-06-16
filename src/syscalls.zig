@@ -70,3 +70,17 @@ pub fn clone(
     const signed_ret: isize = @bitCast(ret);
     return @truncate(signed_ret);
 }
+
+pub fn mount(
+    source: [*:0]const u8,
+    target: [*:0]const u8,
+    fstype: ?[*:0]const u8,
+    flags: u32,
+    data: usize,
+) SyscallError!void {
+    const ret = linux.mount(source, target, fstype, flags, data);
+    const err = linux.E.init(ret);
+    if (err != .SUCCESS) {
+        return toSyscallError(err);
+    }
+}

@@ -71,27 +71,24 @@ pub fn child(configPtr: usize) callconv(.C) u8 {
     // Remount root privately to ensure mount events are not replicated
     // in our view of the filesystem
     //
-    var ret = linux.mount("", "/", null, linux.MS.PRIVATE | linux.MS.REC, 0);
-    if (linux.E.init(ret) != .SUCCESS) {
-        std.debug.panic("failed to remove shared propagation on mount: {}\n", .{linux.E.init(ret)});
-    }
+    syscalls.mount("", "/", null, linux.MS.PRIVATE | linux.MS.REC, 0) catch |err| {
+        std.debug.panic("failed to remove shared propagation on mount: {s}\n", .{@errorName(err)});
+    };
 
     //
     // Bind mount the new root filesystem to the lower layer of OverlayFS
     //
-    ret = linux.mount(newRoot, ofs.lowerdir.ptr, null, linux.MS.BIND, 0);
-    if (linux.E.init(ret) != .SUCCESS) {
-        std.debug.panic("failed to bind mount new root: {}\n", .{linux.E.init(ret)});
-    }
+    syscalls.mount(newRoot, ofs.lowerdir.ptr, null, linux.MS.BIND, 0) catch |err| {
+        std.debug.panic("failed to bind mount new root: {s}\n", .{@errorName(err)});
+    };
 
     //
     // Create a new OverlayFS mount on the merged directory
     //
     const mergedNewRoot = ofs.mergedDir;
-    ret = linux.mount("overlay", mergedNewRoot.ptr, "overlay", 0, @intFromPtr(ofs.mountData.ptr));
-    if (linux.E.init(ret) != .SUCCESS) {
-        std.debug.panic("failed to mount overlayfs: {}\n", .{linux.E.init(ret)});
-    }
+    syscalls.mount("overlay", mergedNewRoot.ptr, "overlay", 0, @intFromPtr(ofs.mountData.ptr)) catch |err| {
+        std.debug.panic("failed to mount overlayfs: {s}\n", .{@errorName(err)});
+    };
 
     //
     // Prepare pivoting by placing old root under new root, so that we don't lose its reference
@@ -112,7 +109,7 @@ pub fn child(configPtr: usize) callconv(.C) u8 {
     //
     // Pivot root
     //
-    ret = linux.syscall2(.pivot_root, @intFromPtr(mergedNewRoot.ptr), @intFromPtr(fullOldRoot.ptr));
+    var ret = linux.syscall2(.pivot_root, @intFromPtr(mergedNewRoot.ptr), @intFromPtr(fullOldRoot.ptr));
     if (linux.E.init(ret) != .SUCCESS) {
         std.debug.panic("pivot failed: {}\n", .{linux.E.init(ret)});
     }
@@ -137,20 +134,21 @@ pub fn child(configPtr: usize) callconv(.C) u8 {
     //
     const mountFlags = linux.MS.NOEXEC | linux.MS.NOSUID | linux.MS.NODEV;
 
-    ret = linux.mount("proc", "/proc", "proc", mountFlags, 0);
-    if (linux.E.init(ret) != .SUCCESS) {
-        std.debug.panic("mount proc failed: {}\n", .{linux.E.init(ret)});
-    }
+    syscalls.mount("proc", "/proc", "proc", mountFlags, 0) catch |err| {
+        std.debug.panic("mount proc failed: {s}\n", .{@errorName(err)});
+    };
 
-    ret = linux.mount("sysfs", "/sys", "sysfs", mountFlags | linux.MS.RDONLY, 0);
-    if (linux.E.init(ret) != .SUCCESS) {
-        std.debug.panic("mount sysfs failed: {}\n", .{linux.E.init(ret)});
-    }
+    syscalls.mount("sysfs", "/sys", "sysfs", mountFlags | linux.MS.RDONLY, 0) catch |err| {
+        std.debug.panic("mount sysfs failed: {s}\n", .{@errorName(err)});
+    };
 
-    ret = linux.mount("devtmpfs", "/dev", "devtmpfs", mountFlags, 0);
-    if (linux.E.init(ret) != .SUCCESS) {
-        std.debug.panic("mount devtmpfs failed: {}\n", .{linux.E.init(ret)});
-    }
+    syscalls.mount("devtmpfs", "/dev", "devtmpfs", mountFlags, 0) catch |err| {
+        std.debug.panic("mount devtmpfs failed: {s}\n", .{@errorName(err)});
+    };
+
+    syscalls.mount("tmpfs", "/run", "tmpfs", mountFlags, 0) catch |err| {
+        std.debug.panic("mount tmpfs failed: {s}\n", .{@errorName(err)});
+    };
 
     const hostname: []const u8 = "container";
     ret = linux.syscall2(.sethostname, @intFromPtr(hostname.ptr), hostname.len);
